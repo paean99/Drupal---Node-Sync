@@ -1,0 +1,10 @@
+name = Node sync
+description = Node sync
+core = 7.x
+
+dependencies[] = entity
+dependencies[] = field
+dependencies[] = entity
+dependencies[] = entityreference
+
+configure = admin/structure/node-sync
