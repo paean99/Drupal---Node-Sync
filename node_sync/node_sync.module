@@ -74,6 +74,9 @@ function node_sync_node_insert_or_update($node, $action) {
  */
 function node_sync_node_sync($node, $source_node, $fields_to_sync = array(), $clear_cache = FALSE) {
 
+  // set the configuration of the node like the revision settings on the $node object
+  node_object_prepare($node);
+
   // Override field values.
   foreach ($fields_to_sync as $fid) {
     if (isset($node->$fid) && isset($source_node->$fid)) {
@@ -81,8 +84,9 @@ function node_sync_node_sync($node, $source_node, $fields_to_sync = array(), $cl
     }
   }
 
-  // Save. @NOTE Using node_save can produce an infinite loop.
-  field_attach_update('node', $node);
+  // Save. @NOTE Using node_save can produce an infinite loop and
+  // field_attach_update() do not respect revisions
+  node_sync_revision_sync($node);
 
   if ($clear_cache) {
     // Clear the static loading cache.
@@ -104,6 +108,144 @@ function node_sync_sync_nodes($node, $source_field, $fields_to_sync) {
     node_sync_node_sync(node_load($nid), $node, $fields_to_sync, TRUE);
   }
 }
+
+
+/**
+ * Saves changes to a node or/and its revisions.
+ * An edited copy of node_save()
+ *
+ * @param $node
+ *   The $node object to be saved.
+ */
+function  node_sync_revision_sync($node) {
+  $transaction = db_transaction();
+
+  try {
+    // Load the stored entity, if any.
+    if (!empty($node->nid) && !isset($node->original)) {
+      $node->original = entity_load_unchanged('node', $node->nid);
+    }
+
+    global $user;
+
+    // Set the timestamp fields.
+    if (empty($node->created)) {
+      $node->created = REQUEST_TIME;
+    }
+    // The changed timestamp is always updated for bookkeeping purposes,
+    // for example: revisions, searching, etc.
+    $node->changed = REQUEST_TIME;
+
+    $node->timestamp = REQUEST_TIME;
+    $update_node = TRUE;
+
+    // Let modules modify the node before it is saved to the database.
+    // uses edited version of module_invoke_all()
+    node_sync_mod_inv_all('node_presave', $node);
+    node_sync_mod_inv_all('entity_presave', $node, 'node');
+
+    // When saving a new node revision, unset any existing $node->vid so as to
+    // ensure that a new revision will actually be created, then store the old
+    // revision ID in a separate property for use by node hook implementations.
+    if (!empty($node->revision) && $node->vid) {
+      unset($node->vid);
+    }
+
+    // Save the node and node revision.
+
+    // For existing nodes, update the node record which matches the value of
+    // $node->nid.
+    drupal_write_record('node', $node, 'nid');
+    // Then, if a new node revision was requested, save a new record for
+    // that; otherwise, update the node revision record which matches the
+    // value of $node->vid.
+    if (!empty($node->revision)) {
+      _node_save_revision($node, $user->uid);
+    }
+    else {
+      _node_save_revision($node, $user->uid, 'vid');
+      $update_node = FALSE;
+    }
+    $op = 'update';
+
+    if ($update_node) {
+      db_update('node')
+        ->fields(array('vid' => $node->vid))
+        ->condition('nid', $node->nid)
+        ->execute();
+    }
+
+    // Call the node specific callback (if any). This can be
+    // node_invoke($node, 'insert') or
+    // node_invoke($node, 'update').
+    node_invoke($node, $op);
+
+    // Save fields.
+    $function = "field_attach_$op";
+    $function('node', $node);
+
+    // call an edited version of module_invoke_all()
+    node_sync_mod_inv_all('node_' . $op, $node);
+    node_sync_mod_inv_all('entity_' . $op, $node, 'node');
+
+    // Update the node access table for this node.
+    // TODO node_sync: delete. Probably not needed here. Unless revisions...
+    node_access_acquire_grants($node);
+
+    // Clear internal properties.
+    unset($node->original);
+
+    // Ignore slave server temporarily to give time for the
+    // saved node to be propagated to the slave.
+    db_ignore_slave();
+  }
+  catch (Exception $e) {
+    $transaction->rollback();
+    watchdog_exception('node', $e);
+    throw $e;
+  }
+}
+
+
+/**
+ * Overrides module_invoke_all() to avoid infinite recursion
+ *
+ * @param $hook
+ *   The name of the hook to invoke.
+ * @param ...
+ *   Arguments to pass to the hook.
+ *
+ * @return
+ *   An array of return values of the hook implementations. If modules return
+ *   arrays from their implementations, those are merged into one array
+ *   recursively. Note: integer keys in arrays will be lost, as the merge is
+ *   done using array_merge_recursive().
+ *
+ */
+function node_sync_mod_inv_all($hook) {
+  $args = func_get_args();
+  // Remove $hook from the arguments.
+  unset($args[0]);
+  $return = array();
+  foreach (module_implements($hook) as $module) {
+    $function = $module . '_' . $hook;
+    if (function_exists($function)) {
+      if ($module != 'node_sync'){
+        $result = call_user_func_array($function, $args);
+      }
+
+      if (isset($result) && is_array($result)) {
+        $return = array_merge_recursive($return, $result);
+      }
+      elseif (isset($result)) {
+        $return[] = $result;
+      }
+    }
+  }
+
+  return $return;
+}
+
 
 /**
  * Get all nodes refering to node through field.
