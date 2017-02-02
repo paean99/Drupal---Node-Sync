@@ -30,9 +30,11 @@ function node_sync_node_insert_or_update($node, $action) {
   // Get node sync configuration.
   $source_field = variable_get('node_sync_' . $node->type . '_source_field', NULL);
   $fields_to_sync = variable_get('node_sync_' . $node->type . '_fields_to_apply', array());
+  // List of all node types.
+  $node_types = node_type_get_types();
 
-  // Just run if needed.
-  if (!empty($source_field) && !empty($fields_to_sync)) {
+  // Synced node; sync form source.
+  if (!empty($source_field)) {
     $Node = entity_metadata_wrapper('node', $node);
     $node_sync_nid = isset($Node->$source_field) ? $Node->$source_field->raw() : NULL;
 
@@ -43,6 +45,17 @@ function node_sync_node_insert_or_update($node, $action) {
     // Otherwhise check if this node is the sync node of others.
     else {
       node_sync_sync_nodes($node, $source_field, $fields_to_sync);
+    }
+  }
+  // Source node; sync all referencing nodes.
+  else {
+    foreach ($node_types as $node_type => $node_type_value) {
+      $source_field = variable_get('node_sync_' . $node_type . '_source_field', NULL);
+      $fields_to_sync = variable_get('node_sync_' . $node_type . '_fields_to_apply', array());
+
+      if (!empty($source_field) && !empty($fields_to_sync)) {
+        node_sync_sync_nodes($node, $source_field, $fields_to_sync);
+      }
     }
   }
 }
@@ -105,7 +118,6 @@ function node_sync_get_nodes_to_sync($node, $source_field) {
   $query = new EntityFieldQuery();
   $query
     ->entityCondition('entity_type', 'node', '=')
-    ->propertyCondition('type', $node->type, '=')
     ->fieldCondition($source_field, 'target_id', $node->nid, '=');
 
   $result = $query->execute();
