@@ -7,6 +7,8 @@
 
 /**
  * Implements hook_node_insert().
+ *
+ * @param object $node
  */
 function node_sync_node_insert($node) {
   node_sync_node_insert_or_update($node, 'insert');
@@ -14,6 +16,8 @@ function node_sync_node_insert($node) {
 
 /**
  * Implements hook_node_update().
+ *
+ * @param object $node
  */
 function node_sync_node_update($node) {
   node_sync_node_insert_or_update($node, 'update');
@@ -65,7 +69,7 @@ function node_sync_node_insert_or_update($node, $action) {
  *
  * @param object $node
  *   Node to be updated.
- * @param int $source_node
+ * @param object $source_node
  *   Source node.
  * @param array $fields_to_sync
  *   Fields to be synced.
@@ -74,7 +78,7 @@ function node_sync_node_insert_or_update($node, $action) {
  */
 function node_sync_node_sync($node, $source_node, $fields_to_sync = array(), $clear_cache = FALSE) {
 
-  // set the configuration of the node like the revision settings on the $node object
+  // get the configuration of the node like the revision settings on the $node object
   node_object_prepare($node);
 
   // Override field values.
@@ -98,7 +102,7 @@ function node_sync_node_sync($node, $source_node, $fields_to_sync = array(), $cl
  * Sync all nodes referencing to $node using field $source_field.
  *
  * @param object $node
- * @param int $source_field
+ * @param object $source_field
  * @param array $fields_to_sync
  */
 function node_sync_sync_nodes($node, $source_field, $fields_to_sync) {
@@ -114,7 +118,7 @@ function node_sync_sync_nodes($node, $source_field, $fields_to_sync) {
  * Saves changes to a node or/and its revisions.
  * An edited copy of node_save()
  *
- * @param $node
+ * @param object $node
  *   The $node object to be saved.
  */
 function  node_sync_revision_sync($node) {
@@ -215,7 +219,7 @@ function  node_sync_revision_sync($node) {
  * @param ...
  *   Arguments to pass to the hook.
  *
- * @return
+ * @return array
  *   An array of return values of the hook implementations. If modules return
  *   arrays from their implementations, those are merged into one array
  *   recursively. Note: integer keys in arrays will be lost, as the merge is
@@ -251,7 +255,7 @@ function node_sync_mod_inv_all($hook) {
  * Get all nodes refering to node through field.
  *
  * @param object $node
- * @param int $source_field
+ * @param object $source_field
  * @return array
  */
 function node_sync_get_nodes_to_sync($node, $source_field) {
@@ -300,6 +304,10 @@ function node_sync_menu() {
 
 /**
  * Settings form.
+ *
+ * @param array $form
+ * @param array $form_state
+ * @return array
  */
 function node_sync_settings($form, &$form_state) {
 
@@ -310,13 +318,21 @@ function node_sync_settings($form, &$form_state) {
     $fields = field_info_instances('node', $node_type);
     $field_options = array();
     $reference_options = array();
+    $reference_target = array();
 
-    foreach ($fields as $fid => $field_value) {
-      $info = field_info_field($fid);
-      if ($info['type'] == 'entityreference') {
-        $reference_options[$fid] = $field_value['label'];
+    // using only $field in the foreach since $fid of
+    // 'foreach ($fields as $fid => $field_value)'
+    // returns empty in field_info_field
+    // for ['settings']['handler_settings']['target_bundles']
+    // and it is also accessible by $field['label']
+    foreach ($fields as $field) {
+      if ($field['display']['default']['module'] == 'entityreference') {
+        $info = field_info_field($field['field_name']);
+
+        $reference_options[$field['field_name']] = $field['label'];
+        $reference_target[$field['field_name']] = $info['settings']['handler_settings']['target_bundles'];
       }
-      $field_options[$fid] = $field_value['label'];
+      $field_options[$field['field_name']] = $field['label'];
     }
 
     $form['node_sync_' . $node_type] = array(
@@ -334,6 +350,19 @@ function node_sync_settings($form, &$form_state) {
       '#empty_option' => '-' . t('None') . '-',
       '#default_value' => variable_get('node_sync_' . $node_type . '_source_field'),
       '#description' => t('Define "entityreference" field wich is going to have the node reference to take all field values and sync.'),
+      '#ajax' => array(
+        'callback' => 'node_sync_sync_node_bundle_ajax',
+        'wrapper' => 'node_sync_sync_node_bundle' . $node_type,
+        // the parameters in the AJAX callback don't seem to be documented anywhere...
+        'parameters'=>array('$node_type' => $node_type, '$reference_target' => $reference_target ),
+      ),
+    );
+
+    // Form control that will be replaced by the AJAX call. It is targeted by the html id in the #prefix
+    $form['node_sync_' . $node_type]['node_sync_' . $node_type . '_sync_node_type'] = array(
+      '#prefix' => '<div id="node_sync_sync_node_bundle' . $node_type . '" >' . $bundle = !empty(variable_get('node_sync_' . $node_type . '_source_field'))
+          ? 'The Field: "' . variable_get('node_sync_' . $node_type . '_source_field') . '" is referencing the Bundle(s): "' . implode(', ', $reference_target[variable_get('node_sync_' . $node_type . '_source_field')]) . '"' : 'No Bundle are referenced',
+      '#suffix' => '</div>',
     );
 
     $form['node_sync_' . $node_type]['node_sync_' . $node_type . '_fields_to_apply'] = array(
@@ -349,8 +378,28 @@ function node_sync_settings($form, &$form_state) {
   return system_settings_form($form);
 }
 
+
+/**
+ * AJAX callback for Bundle of sync node.
+ */
+function node_sync_sync_node_bundle_ajax($form, $form_state) {
+  $node_type = $form_state['triggering_element']['#ajax']['parameters']['$node_type'];
+  $reference_target = $form_state['triggering_element']['#ajax']['parameters']['$reference_target'];
+  $bundle = !empty($form_state['values']['node_sync_' . $node_type . '_source_field'])
+    ? 'The Field: "' . $form_state['values']['node_sync_' . $node_type . '_source_field'] . '" is referencing the Bundle(s): "' . implode(', ', $reference_target[$form_state['triggering_element']['#value']]) . '"' : 'No Bundle are referenced';
+  // Do not forget to maintain the html id in this callback or it will be replaced
+  // and will endup working only once
+  $markup = '<div id="node_sync_sync_node_bundle' . $node_type . '" >' . $bundle . '</div>';
+  return $markup;
+}
+
+
 /**
  * Implementes hook_form_node_form_alter().
+ *
+ * @param array $form
+ * @param array $form_state
+ * @return array
  */
 function node_sync_form_node_form_alter(&$form, $form_state) {
 
